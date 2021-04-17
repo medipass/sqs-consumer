@@ -692,6 +692,81 @@ describe('Consumer', () => {
       });
       sandbox.assert.calledOnce(clearIntervalSpy);
     });
+
+    it('calls all queue url handler in FIFO order when queueUrl is an array', async () => {
+      const receiveMessageStub = sandbox.stub().onCall(0).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '1', ReceiptHandle: 'receipt-handle-1', Body: 'body-1' }
+          ]
+        };
+      } }).onCall(1).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '2', ReceiptHandle: 'receipt-handle-2', Body: 'body-2' }
+          ]
+        };
+      } }).onCall(2).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '3', ReceiptHandle: 'receipt-handle-3', Body: 'body-3' }
+          ]
+        };
+      } });
+      sqs.receiveMessage = receiveMessageStub;
+      const handleMessageStub = sandbox.stub().resolves();
+      consumer = new Consumer({
+        queueUrl: ['queue-1', 'queue-2', 'queue-3'],
+        region: 'some-region',
+        handleMessage: handleMessageStub,
+        sqs
+      });
+      consumer.start();
+      await Promise.all([pEvent(consumer, 'response_processed'), clock.tickAsync(1)]);
+      consumer.stop();
+      assert.isTrue(receiveMessageStub.calledThrice);
+      assert.equal(receiveMessageStub.args[0][0].QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-2');
+      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-3');
+    });
+
+    it('sticks to first queue url longer when sticky value is set', async () => {
+      const receiveMessageStub = sandbox.stub().onCall(0).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '1', ReceiptHandle: 'receipt-handle-1', Body: 'body-1' }
+          ]
+        };
+      } }).onCall(1).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '2', ReceiptHandle: 'receipt-handle-2', Body: 'body-2' }
+          ]
+        };
+      } }).onCall(2).returns({ promise: async () => {
+        return {
+          Messages: [
+            { MessageId: '3', ReceiptHandle: 'receipt-handle-3', Body: 'body-3' }
+          ]
+        };
+      } });
+      sqs.receiveMessage = receiveMessageStub;
+      const handleMessageStub = sandbox.stub().resolves();
+      consumer = new Consumer({
+        queueUrl: ['queue-1', 'queue-2'],
+        sticky: [1, 0],
+        region: 'some-region',
+        handleMessage: handleMessageStub,
+        sqs
+      });
+      consumer.start();
+      await Promise.all([pEvent(consumer, 'response_processed'), clock.tickAsync(1)]);
+      consumer.stop();
+      assert.isTrue(receiveMessageStub.calledThrice);
+      assert.equal(receiveMessageStub.args[0][0].QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-2');
+    });
   });
 
   describe('.stop', () => {

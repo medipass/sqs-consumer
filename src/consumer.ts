@@ -74,20 +74,21 @@ function hasMessages(response: ReceieveMessageResponse): boolean {
 }
 
 export interface ConsumerOptions {
-  queueUrl?: string;
   attributeNames?: string[];
-  messageAttributeNames?: string[];
-  stopped?: boolean;
-  batchSize?: number;
-  visibilityTimeout?: number;
-  waitTimeSeconds?: number;
   authenticationErrorTimeout?: number;
-  pollingWaitTimeMs?: number;
-  terminateVisibilityTimeout?: boolean;
-  heartbeatInterval?: number;
-  sqs?: SQS;
-  region?: string;
+  batchSize?: number;
   handleMessageTimeout?: number;
+  heartbeatInterval?: number;
+  messageAttributeNames?: string[];
+  pollingWaitTimeMs?: number;
+  queueUrl?: string|string[];
+  region?: string;
+  sqs?: SQS;
+  sticky?: number[];
+  stopped?: boolean;
+  terminateVisibilityTimeout?: boolean;
+  visibilityTimeout?: number;
+  waitTimeSeconds?: number|number[];
   handleMessage?(message: SQSMessage): Promise<void>;
   handleMessageBatch?(messages: SQSMessage[]): Promise<void>;
 }
@@ -101,10 +102,14 @@ interface Events {
   'timeout_error': [Error, SQSMessage];
   'processing_error': [Error, SQSMessage];
   'stopped': [];
+  // 'queue_attribute_retrieval_error': [Error, string[]];
 }
 
 export class Consumer extends EventEmitter {
-  private queueUrl: string;
+  private queueUrls: string[];
+  // private queueUrl: string;
+  // private previousQueuePointer: number;
+  private currentQueueIndex: number;
   private handleMessage: (message: SQSMessage) => Promise<void>;
   private handleMessageBatch: (message: SQSMessage[]) => Promise<void>;
   private handleMessageTimeout: number;
@@ -113,7 +118,9 @@ export class Consumer extends EventEmitter {
   private stopped: boolean;
   private batchSize: number;
   private visibilityTimeout: number;
-  private waitTimeSeconds: number;
+  private waitTimeSeconds: number[];
+  private sticky: number[];
+  private lastReceiveTime: number[];
   private authenticationErrorTimeout: number;
   private pollingWaitTimeMs: number;
   private terminateVisibilityTimeout: boolean;
@@ -123,7 +130,6 @@ export class Consumer extends EventEmitter {
   constructor(options: ConsumerOptions) {
     super();
     assertOptions(options);
-    this.queueUrl = options.queueUrl;
     this.handleMessage = options.handleMessage;
     this.handleMessageBatch = options.handleMessageBatch;
     this.handleMessageTimeout = options.handleMessageTimeout;
@@ -134,9 +140,17 @@ export class Consumer extends EventEmitter {
     this.visibilityTimeout = options.visibilityTimeout;
     this.terminateVisibilityTimeout = options.terminateVisibilityTimeout || false;
     this.heartbeatInterval = options.heartbeatInterval;
-    this.waitTimeSeconds = options.waitTimeSeconds || 20;
     this.authenticationErrorTimeout = options.authenticationErrorTimeout || 10000;
     this.pollingWaitTimeMs = options.pollingWaitTimeMs || 0;
+
+    // this.previousQueuePointer = -1;
+    this.currentQueueIndex = -1;
+    this.queueUrls = typeof options.queueUrl === 'string' ? [options.queueUrl] : options.queueUrl;
+
+    this.waitTimeSeconds = Array.isArray(options.waitTimeSeconds) ? options.waitTimeSeconds : this.queueUrls.map(() => options.waitTimeSeconds as number || 20);
+
+    this.sticky = options.sticky || this.queueUrls.map(() => 0);
+    this.lastReceiveTime = this.queueUrls.map(() => 0);
 
     this.sqs = options.sqs || new SQS({
       region: options.region || process.env.AWS_REGION || 'eu-west-1'
@@ -184,6 +198,10 @@ export class Consumer extends EventEmitter {
 
     if (response) {
       if (hasMessages(response)) {
+        // mark the first time we receive a message in this cycle through the queues
+        if (this.lastReceiveTime[this.currentQueueIndex] === 0) {
+          this.lastReceiveTime[this.currentQueueIndex] = new Date().getTime();
+        }
         if (this.handleMessageBatch) {
           // prefer handling messages in batch when available
           await this.processMessageBatch(response.Messages);
@@ -193,6 +211,7 @@ export class Consumer extends EventEmitter {
         this.emit('response_processed');
       } else {
         this.emit('empty');
+        this.lastReceiveTime[this.currentQueueIndex] = 0;
       }
     }
   }
@@ -235,7 +254,7 @@ export class Consumer extends EventEmitter {
     debug('Deleting message %s', message.MessageId);
 
     const deleteParams = {
-      QueueUrl: this.queueUrl,
+      QueueUrl: this.queueUrls[this.currentQueueIndex],
       ReceiptHandle: message.ReceiptHandle
     };
 
@@ -277,7 +296,7 @@ export class Consumer extends EventEmitter {
     try {
       return this.sqs
         .changeMessageVisibility({
-          QueueUrl: this.queueUrl,
+          QueueUrl: this.queueUrls[this.currentQueueIndex],
           ReceiptHandle: message.ReceiptHandle,
           VisibilityTimeout: timeout
         })
@@ -304,12 +323,13 @@ export class Consumer extends EventEmitter {
     }
 
     debug('Polling for messages');
+    this.determineCurrentQueueIndex();
     const receiveParams = {
-      QueueUrl: this.queueUrl,
+      QueueUrl: this.queueUrls[this.currentQueueIndex],
       AttributeNames: this.attributeNames,
       MessageAttributeNames: this.messageAttributeNames,
       MaxNumberOfMessages: this.batchSize,
-      WaitTimeSeconds: this.waitTimeSeconds,
+      WaitTimeSeconds: this.lastReceiveTime[this.currentQueueIndex] > 0 ? 1 : this.waitTimeSeconds[this.currentQueueIndex],
       VisibilityTimeout: this.visibilityTimeout
     };
 
@@ -319,6 +339,8 @@ export class Consumer extends EventEmitter {
       .catch((err) => {
         this.emit('error', err);
         if (isConnectionError(err)) {
+          // there was an authentication error, so wait a bit before re-polling
+          this.lastReceiveTime[this.currentQueueIndex] = 0;
           debug('There was an authentication error. Pausing before retrying.');
           currentPollingTimeout = this.authenticationErrorTimeout;
         }
@@ -326,9 +348,53 @@ export class Consumer extends EventEmitter {
       }).then(() => {
         setTimeout(this.poll, currentPollingTimeout);
       }).catch((err) => {
+        // there were no messages, so start polling again
+        this.lastReceiveTime[this.currentQueueIndex] = 0;
         this.emit('error', err);
       });
   }
+
+  private determineCurrentQueueIndex(): number {
+    if (this.currentQueueIndex === -1) return ++this.currentQueueIndex;
+    const stickyValue = this.sticky[this.currentQueueIndex];
+    const lastReceiveTime = this.lastReceiveTime[this.currentQueueIndex];
+    if (!(stickyValue && (new Date().getTime() - lastReceiveTime) < stickyValue)) {
+      this.lastReceiveTime[this.currentQueueIndex] = 0;
+      this.currentQueueIndex++;
+      if (this.currentQueueIndex >= this.queueUrls.length) {
+        this.currentQueueIndex = 0;
+      }
+    }
+    return this.currentQueueIndex;
+  }
+
+  // private async determineCurrentQueueUrl(): Promise<void> {
+  //   debug('Determining queue priority');
+  //   let queuePointer = this.previousQueuePointer + 1 < this.queueUrls.length ? this.previousQueuePointer + 1 : 0;
+  //   try {
+  //     const approximateNumberOfMessages = await Promise.all(this.queueUrls.map(async (queueUrl) => {
+  //       const queryParams = {
+  //         QueueUrl: queueUrl,
+  //         AttributeNames: ['ApproximateNumberOfMessages']
+  //       };
+  //       const res = await this.sqs.getQueueAttributes(queryParams).promise();
+  //       return res['ApproximateNumberOfMessages'] ?? 0;
+  //     }));
+  //     const queueUrlIndex = approximateNumberOfMessages.find((approximateNumberOfMessage) => approximateNumberOfMessage > 0);
+  //     if (queueUrlIndex > -1) {
+  //       debug(`Queue priority is determined by the initial ranking and the number of messages available in each of the queue. ApproximateNumberOfMessages: [${approximateNumberOfMessages.join(',')}].`);
+  //       queuePointer = queueUrlIndex;
+  //     } else {
+  //       debug('Queue priority is determined by the previous queue position.');
+  //     }
+  //   } catch (error) {
+  //     debug('Queue attribute retrieval error. Queue priority is determined by the previous queue position.');
+  //     this.emit('queue_attribute_retrieval_error', error, this.queueUrls);
+  //   }
+  //   debug(`The winner queue url at queueUrls array position: ${queuePointer}. Previous queueUrls array position: ${this.previousQueuePointer}`);
+  //   this.previousQueuePointer = queuePointer;
+  //   this.queueUrl = this.queueUrls[queuePointer];
+  // }
 
   private async processMessageBatch(messages: SQSMessage[]): Promise<void> {
     messages.forEach((message) => {
@@ -362,7 +428,7 @@ export class Consumer extends EventEmitter {
     debug('Deleting messages %s', messages.map((msg) => msg.MessageId).join(' ,'));
 
     const deleteParams = {
-      QueueUrl: this.queueUrl,
+      QueueUrl: this.queueUrls[this.currentQueueIndex],
       Entries: messages.map((message) => ({
         Id: message.MessageId,
         ReceiptHandle: message.ReceiptHandle
@@ -389,7 +455,7 @@ export class Consumer extends EventEmitter {
 
   private async changeVisabilityTimeoutBatch(messages: SQSMessage[], timeout: number): Promise<PromiseResult<any, AWSError>> {
     const params = {
-      QueueUrl: this.queueUrl,
+      QueueUrl: this.queueUrls[this.currentQueueIndex],
       Entries: messages.map((message) => ({
         Id: message.MessageId,
         ReceiptHandle: message.ReceiptHandle,
