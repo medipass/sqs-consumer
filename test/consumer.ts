@@ -343,20 +343,20 @@ describe('Consumer', () => {
 
     it('fires a message_received event when a message is received', async () => {
       consumer.start();
-      const message = await pEvent(consumer, 'message_received');
+      const message = await pEvent(consumer, 'message_received', { multiArgs: true });
       consumer.stop();
 
-      assert.equal(message, response.Messages[0]);
+      assert.deepEqual(message, ['some-queue-url', response.Messages[0]]);
     });
 
     it('fires a message_processed event when a message is successfully deleted', async () => {
       handleMessage.resolves();
 
       consumer.start();
-      const message = await pEvent(consumer, 'message_received');
+      const message = await pEvent(consumer, 'message_received', { multiArgs: true });
       consumer.stop();
 
-      assert.equal(message, response.Messages[0]);
+      assert.deepEqual(message, ['some-queue-url', response.Messages[0]]);
     });
 
     it('calls the handleMessage function when a message is received', async () => {
@@ -484,7 +484,7 @@ describe('Consumer', () => {
       });
 
       consumer.start();
-      const message = await pEvent(consumer, 'message_received');
+      const message = await pEvent(consumer, 'message_received', { multiArgs: true });
       consumer.stop();
 
       sandbox.assert.calledWith(sqs.receiveMessage, {
@@ -496,7 +496,7 @@ describe('Consumer', () => {
         VisibilityTimeout: undefined
       });
 
-      assert.equal(message, messageWithAttr);
+      assert.equal(message[1], messageWithAttr);
     });
 
     it('fires an emptyQueue event when all messages have been consumed', async () => {
@@ -693,7 +693,7 @@ describe('Consumer', () => {
       sandbox.assert.calledOnce(clearIntervalSpy);
     });
 
-    it('calls all queue url handler in FIFO order when queueUrl is an array', async () => {
+    it('should process messages from higher first before others', async () => {
       const receiveMessageStub = sandbox.stub().onCall(0).returns({ promise: async () => {
         return {
           Messages: [
@@ -726,22 +726,18 @@ describe('Consumer', () => {
       consumer.stop();
       assert.isTrue(receiveMessageStub.calledThrice);
       assert.equal(receiveMessageStub.args[0][0].QueueUrl, 'queue-1');
-      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-2');
-      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-3');
+      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-1');
     });
 
-    it('sticks to first queue url longer when sticky value is set', async () => {
+    it('should process rest of the lower tier messages if there is no other higher tier message', async () => {
       const receiveMessageStub = sandbox.stub().onCall(0).returns({ promise: async () => {
         return {
-          Messages: [
-            { MessageId: '1', ReceiptHandle: 'receipt-handle-1', Body: 'body-1' }
-          ]
+          Messages: []
         };
       } }).onCall(1).returns({ promise: async () => {
         return {
-          Messages: [
-            { MessageId: '2', ReceiptHandle: 'receipt-handle-2', Body: 'body-2' }
-          ]
+          Messages: []
         };
       } }).onCall(2).returns({ promise: async () => {
         return {
@@ -753,8 +749,7 @@ describe('Consumer', () => {
       sqs.receiveMessage = receiveMessageStub;
       const handleMessageStub = sandbox.stub().resolves();
       consumer = new Consumer({
-        queueUrl: ['queue-1', 'queue-2'],
-        sticky: [1, 0],
+        queueUrl: ['queue-1', 'queue-2', 'queue-3'],
         region: 'some-region',
         handleMessage: handleMessageStub,
         sqs
@@ -762,10 +757,11 @@ describe('Consumer', () => {
       consumer.start();
       await Promise.all([pEvent(consumer, 'response_processed'), clock.tickAsync(1)]);
       consumer.stop();
-      assert.isTrue(receiveMessageStub.calledThrice);
+      assert.equal(receiveMessageStub.callCount, 4);
       assert.equal(receiveMessageStub.args[0][0].QueueUrl, 'queue-1');
-      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-1');
-      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-2');
+      assert.equal(receiveMessageStub.args[1][0].QueueUrl, 'queue-2');
+      assert.equal(receiveMessageStub.args[2][0].QueueUrl, 'queue-3');
+      assert.equal(receiveMessageStub.args[3][0].QueueUrl, 'queue-1');
     });
   });
 
