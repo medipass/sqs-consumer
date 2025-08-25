@@ -2,3 +2,5 @@ node_modules
 coverage
 bake-scripts
 dist
+public
+test/reports

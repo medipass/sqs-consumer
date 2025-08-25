@@ -1,0 +1,13 @@
+body:
+  - type: textarea
+    attributes:
+      label: Summary
+      description: What do you need help with?
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Example
+      description: A link to a minimal reproduction is helpful for debugging! You can use one of our [existing examples](https://github.com/bbc/sqs-consumer-starter/tree/main/examples) to get a reproduction setup quickly.
+    validations:
+      required: false
