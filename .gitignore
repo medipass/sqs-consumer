@@ -3,4 +3,8 @@ test.js
 coverage
 dist
 .nyc_output
+public
+.DS_Store
+test/reports/*
+!test/reports/.keep
 .idea
