@@ -1912,6 +1912,71 @@ describe("Consumer", () => {
         { queueUrl: QUEUE_URL },
       );
     });
+
+    it('should process messages from higher first before others', async () => {
+      sqs.send = sinon.stub();
+      const receiveMessageStub = sqs.send.withArgs(mockReceiveMessage);
+      receiveMessageStub.onFirstCall().resolves({
+        Messages: [
+          { MessageId: '1', ReceiptHandle: 'receipt-handle-1', Body: 'body-1' }
+        ]
+      })
+      .onSecondCall().resolves({
+        Messages: [
+          { MessageId: '2', ReceiptHandle: 'receipt-handle-2', Body: 'body-2' }
+        ]
+      })
+      .onThirdCall().resolves({
+        Messages: [
+          { MessageId: '3', ReceiptHandle: 'receipt-handle-3', Body: 'body-3' }
+        ]
+      });
+      consumer = new Consumer({
+        queueUrl: 'queue-1',
+        queueUrls: ['queue-1', 'queue-2', 'queue-3'],
+        region: 'some-region',
+        handleMessage,
+        sqs
+      });
+      consumer.start();
+      await Promise.all([pEvent(consumer, 'response_processed'), clock.tickAsync(1)]);
+      consumer.stop();
+      assert.isTrue(receiveMessageStub.calledThrice);
+      assert.equal(receiveMessageStub.args[0][0].input.QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[1][0].input.QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[2][0].input.QueueUrl, 'queue-1');
+    });
+
+    it('should process rest of the lower tier messages if there is no other higher tier message', async () => {
+      sqs.send = sinon.stub();
+      const receiveMessageStub = sqs.send.withArgs(mockReceiveMessage);
+      receiveMessageStub.onFirstCall().resolves({
+        Messages: []
+      })
+      .onSecondCall().resolves({
+        Messages: []
+      })
+      .onThirdCall().resolves({
+        Messages: [
+          { MessageId: '3', ReceiptHandle: 'receipt-handle-3', Body: 'body-3' }
+        ]
+      });
+      consumer = new Consumer({
+        queueUrl: 'queue-1',
+        queueUrls: ['queue-1', 'queue-2', 'queue-3'],
+        region: 'some-region',
+        handleMessage,
+        sqs
+      });
+      consumer.start();
+      await Promise.all([pEvent(consumer, 'response_processed'), clock.tickAsync(1)]);
+      consumer.stop();
+      assert.equal(receiveMessageStub.callCount, 4);
+      assert.equal(receiveMessageStub.args[0][0].input.QueueUrl, 'queue-1');
+      assert.equal(receiveMessageStub.args[1][0].input.QueueUrl, 'queue-2');
+      assert.equal(receiveMessageStub.args[2][0].input.QueueUrl, 'queue-3');
+      assert.equal(receiveMessageStub.args[3][0].input.QueueUrl, 'queue-1');
+    });
   });
 
   describe("FIFO Queue Warning", () => {

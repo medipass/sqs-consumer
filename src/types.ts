@@ -10,6 +10,10 @@ import {
  */
 export interface ConsumerOptions {
   /**
+   * The SQS queue URLs.
+   */
+  queueUrls?: string[];
+  /**
    * The SQS queue URL.
    */
   queueUrl: string;

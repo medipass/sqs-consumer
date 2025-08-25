@@ -42,6 +42,7 @@ export class Consumer extends TypedEventEmitter {
   private pollingTimeoutId: NodeJS.Timeout | undefined = undefined;
   private stopped = true;
   protected queueUrl: string;
+  private queueUrls: string[];
   private isFifoQueue: boolean;
   private suppressFifoWarning: boolean;
   private handleMessage: (message: Message) => Promise<Message | void>;
@@ -75,6 +76,7 @@ export class Consumer extends TypedEventEmitter {
     super(options.queueUrl);
     assertOptions(options);
     this.queueUrl = options.queueUrl;
+    this.queueUrls = options.queueUrls || [this.queueUrl];
     this.isFifoQueue = this.queueUrl.endsWith(".fifo");
     this.suppressFifoWarning = options.suppressFifoWarning ?? false;
     this.handleMessage = options.handleMessage;
@@ -310,10 +312,20 @@ export class Consumer extends TypedEventEmitter {
       if (this.preReceiveMessageCallback) {
         await this.preReceiveMessageCallback();
       }
-      const result: ReceiveMessageCommandOutput = await this.sqs.send(
-        new ReceiveMessageCommand(params),
-        this.sqsSendOptions,
-      );
+      let result: ReceiveMessageCommandOutput;
+      for (const [i, queueUrl] of this.queueUrls.entries()) {
+        result = await this.sqs.send(
+            new ReceiveMessageCommand({
+              ...params,
+              QueueUrl: queueUrl
+            }),
+            this.sqsSendOptions,
+        );
+        if (hasMessages(result) || i === this.queueUrls.length - 1) {
+          this.queueUrl = queueUrl;
+          break;
+        }
+      }
       if (this.postReceiveMessageCallback) {
         await this.postReceiveMessageCallback();
       }
