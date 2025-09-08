@@ -213,7 +213,7 @@ export class Consumer extends TypedEventEmitter {
   /**
    * Returns the current queue of the consumer.
    */
-  public get currentQueueUrl(): String {
+  public get currentQueueUrl(): string {
     return this.queueUrl;
   }
 
