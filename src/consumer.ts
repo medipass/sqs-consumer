@@ -211,6 +211,13 @@ export class Consumer extends TypedEventEmitter {
   }
 
   /**
+   * Returns the current queue of the consumer.
+   */
+  public get currentQueueUrl(): String {
+    return this.queueUrl;
+  }
+
+  /**
    * Validates and then updates the provided option to the provided value.
    * @param option The option to validate and then update
    * @param value The value to set the provided option to

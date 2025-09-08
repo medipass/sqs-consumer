@@ -2309,6 +2309,12 @@ describe("Consumer", () => {
     });
   });
 
+  describe("currentQueueUrl", async () => {
+    it("returns current queue url", () => {
+      assert.equal(consumer.currentQueueUrl, QUEUE_URL);
+    });
+  });
+
   describe("updateOption", async () => {
     it("updates the visibilityTimeout option and emits an event", () => {
       const optionUpdatedListener = sandbox.stub();
